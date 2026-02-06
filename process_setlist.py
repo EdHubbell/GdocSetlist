@@ -43,6 +43,49 @@ def extract_setlist(pdf_path):
     print(f"   [OK] Extracted {len(all_songs)} songs")
     return all_songs
 
+def _group_chars_by_line(chars, y_tolerance=2.0):
+    """Group PDF characters into lines by y-coordinate proximity."""
+    if not chars:
+        return []
+    sorted_chars = sorted(chars, key=lambda c: (c['top'], c['x0']))
+    groups = []
+    current = [sorted_chars[0]]
+    ref_y = sorted_chars[0]['top']
+    for c in sorted_chars[1:]:
+        if abs(c['top'] - ref_y) < y_tolerance:
+            current.append(c)
+        else:
+            groups.append(current)
+            current = [c]
+            ref_y = c['top']
+    groups.append(current)
+    return groups
+
+def _detect_body_char_width(line_groups):
+    """Detect monospace character width from adjacent character x-spacing."""
+    spacings = []
+    for lc in line_groups:
+        sc = sorted(lc, key=lambda c: c['x0'])
+        for i in range(1, len(sc)):
+            dx = sc[i]['x0'] - sc[i-1]['x0']
+            if 3 < dx < 10:
+                spacings.append(dx)
+    if not spacings:
+        return 6.17
+    spacings.sort()
+    return spacings[len(spacings) // 2]
+
+def _reconstruct_spaced_line(line_chars, min_x, char_width):
+    """Reconstruct a text line preserving horizontal spacing via column positions."""
+    sc = sorted(line_chars, key=lambda c: c['x0'])
+    result = []
+    for c in sc:
+        col = int((c['x0'] - min_x) / char_width + 0.5)
+        while len(result) < col:
+            result.append(' ')
+        result.append(c['text'])
+    return ''.join(result).rstrip()
+
 def extract_charts(pdf_path):
     print(f"\nReading charts from: {pdf_path}")
     charts = {}
@@ -52,18 +95,55 @@ def extract_charts(pdf_path):
             text = page.extract_text()
             if not text:
                 continue
-            # Simple extraction - just get all lines
             lines = [l for l in text.split('\n') if l.strip() and not re.match(r'^\s*\d+\s*$', l.strip())]
-            if len(lines) >= 2:
-                title = lines[0]
-                notes = lines[1] if len(lines) > 1 else ''
+            if len(lines) < 2:
+                continue
+            title = lines[0]
+            notes = lines[1] if len(lines) > 1 else ''
+
+            # Use character-level extraction for body to preserve chord spacing
+            chars = page.chars
+            if chars and len(lines) > 2:
+                all_lines = _group_chars_by_line(chars)
+                all_lines = [lg for lg in all_lines
+                             if not re.match(r'^\s*\d+\s*$',
+                                 ''.join(c['text'] for c in lg).strip())]
+                if len(all_lines) > 2:
+                    body_groups = all_lines[2:]
+                    char_width = _detect_body_char_width(body_groups)
+                    min_x = min(c['x0'] for lg in body_groups for c in lg)
+
+                    # Detect normal line spacing for blank line insertion
+                    line_ys = [min(c['top'] for c in lg) for lg in body_groups]
+                    normal_spacing = None
+                    if len(line_ys) >= 2:
+                        y_diffs = sorted(line_ys[i+1] - line_ys[i]
+                                         for i in range(len(line_ys) - 1))
+                        normal_spacing = y_diffs[len(y_diffs) // 2]
+
+                    body_lines = []
+                    for i, lg in enumerate(body_groups):
+                        if i > 0 and normal_spacing and normal_spacing > 1:
+                            gap = line_ys[i] - line_ys[i - 1]
+                            blanks = max(0, round(gap / normal_spacing) - 1)
+                            body_lines.extend([''] * blanks)
+                        body_lines.append(
+                            _reconstruct_spaced_line(lg, min_x, char_width))
+
+                    while body_lines and not body_lines[-1]:
+                        body_lines.pop()
+                    body = '\n'.join(body_lines)
+                else:
+                    body = ''
+            else:
                 body = '\n'.join(lines[2:]) if len(lines) > 2 else ''
-                charts[page_num] = {
-                    'title': title,
-                    'notes': notes,
-                    'body': body,
-                    'raw_title': title
-                }
+
+            charts[page_num] = {
+                'title': title,
+                'notes': notes,
+                'body': body,
+                'raw_title': title
+            }
     print(f"   [OK] Extracted {len(charts)} chart pages")
     return charts
 
