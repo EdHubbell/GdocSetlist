@@ -6,8 +6,9 @@ token.json
 __pycache__/
 *.pyc
 
-# IDE / tools
-.claude/
+# Claude Code local overrides
+.claude/settings.local.json
+CLAUDE.local.md
 
 # Windows artifacts
 nul
