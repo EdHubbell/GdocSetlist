@@ -54,4 +54,4 @@ Creates a doc with only the first 2 matched songs for quick verification of form
 | `process_setlist.py` | Main pipeline: extract, match, create formatted Google Doc |
 | `test_2tabs.py` | 2-tab test for verifying formatting |
 | `google_auth.py` | OAuth2 authentication for Google APIs |
-| `create_gdoc.py` | Abandoned line-by-line formatter (kept for reference) |
+
