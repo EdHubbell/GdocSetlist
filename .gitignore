@@ -1,0 +1,13 @@
+# OAuth secrets
+client_secret*.json
+token.json
+
+# Python
+__pycache__/
+*.pyc
+
+# IDE / tools
+.claude/
+
+# Windows artifacts
+nul
