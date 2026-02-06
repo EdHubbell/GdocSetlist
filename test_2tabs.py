@@ -10,7 +10,6 @@ Creates a Google Doc with 2 tabs to verify formatting:
 Uses a single batchUpdate per tab (insert + all formatting in one API call).
 """
 
-import re
 import sys
 from datetime import datetime
 
@@ -20,136 +19,9 @@ from process_setlist import (
     extract_charts,
     match_songs_to_charts,
     execute_with_retry,
+    is_chord_line,
+    build_tab_requests,
 )
-
-# Chord pattern: root note optionally followed by quality/extensions, optional slash bass
-# Matches: A, Am, D7, G/B, Cmaj7, F#m, Bb, Ebm7, Dsus4, Aadd9, etc.
-CHORD_RE = re.compile(
-    r'^[A-G][b#]?'                      # root: A-G with optional sharp/flat
-    r'(m|min|maj|dim|aug|sus|add)?'      # quality
-    r'[0-9]?'                            # extension (7, 9, etc.)
-    r'(sus[24]|add[0-9]+|maj[0-9]+)?'   # additional modifiers
-    r'(/[A-G][b#]?)?$'                   # optional slash bass
-)
-
-
-def is_chord_line(line):
-    """Return True if 80%+ of whitespace-separated tokens are chord symbols or TACET."""
-    tokens = line.split()
-    if not tokens:
-        return False
-    chord_count = 0
-    for token in tokens:
-        # Strip trailing punctuation that might appear (e.g., trailing comma)
-        clean = token.strip('(),|[]')
-        if clean.upper() == 'TACET':
-            chord_count += 1
-        elif CHORD_RE.match(clean):
-            chord_count += 1
-    return (chord_count / len(tokens)) >= 0.8
-
-
-def build_tab_requests(tab_id, title, notes, body_text):
-    """
-    Build all requests for a single tab's content and formatting.
-
-    Returns a list of Google Docs API request dicts to be sent in ONE batchUpdate.
-    Inserts the full text at index 1, then applies formatting using pre-calculated indices.
-    """
-    # Build the full text block
-    full_text = title + '\n' + notes + '\n\n' + body_text + '\n'
-
-    requests = []
-
-    # 1) Insert all text at once
-    requests.append({
-        'insertText': {
-            'location': {'tabId': tab_id, 'index': 1},
-            'text': full_text,
-        }
-    })
-
-    # 2) Consolas 12pt on the entire text
-    text_end = 1 + len(full_text)
-    requests.append({
-        'updateTextStyle': {
-            'range': {
-                'tabId': tab_id,
-                'startIndex': 1,
-                'endIndex': text_end,
-            },
-            'textStyle': {
-                'weightedFontFamily': {'fontFamily': 'Consolas'},
-                'fontSize': {'magnitude': 12, 'unit': 'PT'},
-            },
-            'fields': 'weightedFontFamily,fontSize',
-        }
-    })
-
-    # Pre-calculate line positions
-    # cursor tracks our position in the document (starts at 1, after the implicit newline)
-    cursor = 1
-
-    # Title line
-    title_start = cursor
-    cursor += len(title) + 1  # +1 for '\n'
-    title_end = cursor
-
-    # 3) Center the title
-    requests.append({
-        'updateParagraphStyle': {
-            'range': {
-                'tabId': tab_id,
-                'startIndex': title_start,
-                'endIndex': title_end,
-            },
-            'paragraphStyle': {'alignment': 'CENTER'},
-            'fields': 'alignment',
-        }
-    })
-
-    # Notes line
-    notes_start = cursor
-    cursor += len(notes) + 1  # +1 for '\n'
-    notes_end = cursor
-
-    # 4) Center the notes
-    requests.append({
-        'updateParagraphStyle': {
-            'range': {
-                'tabId': tab_id,
-                'startIndex': notes_start,
-                'endIndex': notes_end,
-            },
-            'paragraphStyle': {'alignment': 'CENTER'},
-            'fields': 'alignment',
-        }
-    })
-
-    # Blank line between notes and body
-    cursor += 1  # the '\n' for the blank line
-
-    # Body lines — bold any chord lines
-    for line in body_text.split('\n'):
-        line_start = cursor
-        cursor += len(line) + 1  # +1 for '\n'
-        line_end = cursor
-
-        if is_chord_line(line):
-            # 5) Bold this chord line
-            requests.append({
-                'updateTextStyle': {
-                    'range': {
-                        'tabId': tab_id,
-                        'startIndex': line_start,
-                        'endIndex': line_end,
-                    },
-                    'textStyle': {'bold': True},
-                    'fields': 'bold',
-                }
-            })
-
-    return requests
 
 
 def main():

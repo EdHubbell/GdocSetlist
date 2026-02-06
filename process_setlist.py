@@ -172,6 +172,97 @@ def match_songs_to_charts(songs, charts, threshold=70):
     print(f"\n   [STATS] Matched {matched_count}/{len(songs)} songs ({matched_count/len(songs)*100:.1f}%)")
     return matches
 
+CHORD_RE = re.compile(
+    r'^[A-G][b#]?'
+    r'(m|min|maj|dim|aug|sus|add)?'
+    r'[0-9]?'
+    r'(sus[24]|add[0-9]+|maj[0-9]+)?'
+    r'(/[A-G][b#]?)?$'
+)
+
+def is_chord_line(line):
+    """Return True if 80%+ of whitespace-separated tokens are chord symbols or TACET."""
+    tokens = line.split()
+    if not tokens:
+        return False
+    chord_count = 0
+    for token in tokens:
+        clean = token.strip('(),|[]')
+        if clean.upper() == 'TACET':
+            chord_count += 1
+        elif CHORD_RE.match(clean):
+            chord_count += 1
+    return (chord_count / len(tokens)) >= 0.8
+
+def build_tab_requests(tab_id, title, notes, body_text):
+    """Build insert + formatting requests for a single tab in ONE batchUpdate."""
+    full_text = title + '\n' + notes + '\n\n' + body_text + '\n'
+    requests = []
+
+    # 1) Insert all text at once
+    requests.append({
+        'insertText': {
+            'location': {'tabId': tab_id, 'index': 1},
+            'text': full_text,
+        }
+    })
+
+    # 2) Consolas 12pt on entire text
+    text_end = 1 + len(full_text)
+    requests.append({
+        'updateTextStyle': {
+            'range': {'tabId': tab_id, 'startIndex': 1, 'endIndex': text_end},
+            'textStyle': {
+                'weightedFontFamily': {'fontFamily': 'Consolas'},
+                'fontSize': {'magnitude': 12, 'unit': 'PT'},
+            },
+            'fields': 'weightedFontFamily,fontSize',
+        }
+    })
+
+    # Pre-calculate line positions (cursor starts at 1)
+    cursor = 1
+
+    # 3) Center the title
+    title_start = cursor
+    cursor += len(title) + 1
+    requests.append({
+        'updateParagraphStyle': {
+            'range': {'tabId': tab_id, 'startIndex': title_start, 'endIndex': cursor},
+            'paragraphStyle': {'alignment': 'CENTER'},
+            'fields': 'alignment',
+        }
+    })
+
+    # 4) Center the notes
+    notes_start = cursor
+    cursor += len(notes) + 1
+    requests.append({
+        'updateParagraphStyle': {
+            'range': {'tabId': tab_id, 'startIndex': notes_start, 'endIndex': cursor},
+            'paragraphStyle': {'alignment': 'CENTER'},
+            'fields': 'alignment',
+        }
+    })
+
+    # Skip blank line
+    cursor += 1
+
+    # 5) Bold chord lines in body
+    for line in body_text.split('\n'):
+        line_start = cursor
+        cursor += len(line) + 1
+        if is_chord_line(line):
+            requests.append({
+                'updateTextStyle': {
+                    'range': {'tabId': tab_id, 'startIndex': line_start, 'endIndex': cursor},
+                    'textStyle': {'bold': True},
+                    'fields': 'bold',
+                }
+            })
+
+    return requests
+
 def execute_with_retry(service, documentId, body, max_retries=5):
     for attempt in range(max_retries):
         try:
@@ -230,17 +321,17 @@ def create_google_doc(matches, title="Yonder 7th Feb Setlist"):
         print(f"[WARNING] Could not remove Tab 1: {e}")
     time.sleep(2.0)
     
-    # Add content to each tab
+    # Add content + formatting to each tab (single batchUpdate per tab)
     print(f"[GOOGLE DOCS] Adding content to tabs...")
     doc = service.documents().get(documentId=doc_id, includeTabsContent=True).execute()
     tabs = doc.get('tabs', [])
-    
+
     for idx, (song, data) in enumerate(song_list):
         if idx >= len(tabs):
             break
-        
+
         tab_id = tabs[idx].get('tabProperties', {}).get('tabId')
-        
+
         if not data['matched']:
             try:
                 execute_with_retry(service, doc_id, {'requests': [{'insertText': {'location': {'tabId': tab_id, 'index': 1}, 'text': "[No chart found]\n"}}]})
@@ -248,26 +339,18 @@ def create_google_doc(matches, title="Yonder 7th Feb Setlist"):
             except Exception as e:
                 print(f"[ERROR] Failed: {e}")
             continue
-        
-        # Build simple content
-        content_parts = []
-        if data.get('title'):
-            content_parts.append(data['title'])
-        if data.get('notes'):
-            content_parts.append(data['notes'])
-        if data.get('body'):
-            content_parts.append(data['body'])
-        
-        full_text = '\n\n'.join(content_parts) + '\n'
-        
+
         try:
-            # Insert text only - no formatting (too error-prone)
-            execute_with_retry(service, doc_id, {'requests': [{'insertText': {'location': {'tabId': tab_id, 'index': 1}, 'text': full_text}}]})
-            print(f"[GOOGLE DOCS] Added content: {song}")
+            reqs = build_tab_requests(
+                tab_id,
+                data.get('title', ''),
+                data.get('notes', ''),
+                data.get('body', ''),
+            )
+            execute_with_retry(service, doc_id, {'requests': reqs})
+            print(f"[GOOGLE DOCS] Formatted: {song}")
         except Exception as e:
             print(f"[ERROR] Failed: {e}")
-        
-        time.sleep(1.0)
     
     print(f"[GOOGLE DOCS] Document creation complete")
     print(f"[GOOGLE DOCS] Document URL: {doc_url}")
