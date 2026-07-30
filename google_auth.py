@@ -9,8 +9,10 @@ Subsequent runs use cached token.json.
 
 import os
 import json
+import glob
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
+from google.auth.exceptions import RefreshError
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
@@ -20,8 +22,27 @@ SCOPES = [
     'https://www.googleapis.com/auth/drive'
 ]
 
-CREDENTIALS_FILE = "client_secret_551449482131-lcp5sq6l3qha70vrmd6vs0lb4ngd8tqg.apps.googleusercontent.com.json"
 TOKEN_FILE = "token.json"
+
+
+def find_credentials_file():
+    """Locate the OAuth client secret JSON downloaded from Cloud Console.
+
+    The filename embeds the client ID, so it changes whenever the OAuth
+    client is recreated - discover it rather than hardcoding it.
+    """
+    matches = sorted(glob.glob("client_secret*.json"))
+    if not matches:
+        raise FileNotFoundError(
+            "No client_secret*.json found in the current directory.\n"
+            "Download an OAuth 'Desktop app' client from "
+            "https://console.cloud.google.com/apis/credentials and place it here."
+        )
+    if len(matches) > 1:
+        # Most recently downloaded wins; stale ones are usually deleted clients.
+        matches.sort(key=os.path.getmtime, reverse=True)
+        print(f"[WARNING] Multiple client secret files found; using {matches[0]}")
+    return matches[0]
 
 
 def get_credentials():
@@ -40,22 +61,28 @@ def get_credentials():
     
     # If no valid credentials, run OAuth flow
     if not creds or not creds.valid:
+        refreshed = False
         if creds and creds.expired and creds.refresh_token:
             print("[INFO] Refreshing expired token...")
-            creds.refresh(Request())
-        else:
+            try:
+                creds.refresh(Request())
+                refreshed = True
+            except RefreshError as e:
+                # Token is tied to a deleted/revoked client, or consent was
+                # withdrawn. Discard it and re-authenticate from scratch.
+                print(f"[WARNING] Could not refresh saved token: {e}")
+                print("[INFO] Discarding stale token and re-authenticating.")
+                creds = None
+
+        if not refreshed:
+            credentials_file = find_credentials_file()
             print("[INFO] No valid credentials found. Starting OAuth flow...")
+            print(f"[INFO] Using client secret: {credentials_file}")
             print("[INFO] A browser window will open for authentication.")
             print("[INFO] Please log in and grant the requested permissions.")
-            
-            if not os.path.exists(CREDENTIALS_FILE):
-                raise FileNotFoundError(
-                    f"Credentials file not found: {CREDENTIALS_FILE}\n"
-                    "Please ensure the client secrets JSON file is in the current directory."
-                )
-            
+
             flow = InstalledAppFlow.from_client_secrets_file(
-                CREDENTIALS_FILE, SCOPES)
+                credentials_file, SCOPES)
             creds = flow.run_local_server(port=0)
             print("[INFO] Authentication successful!")
         

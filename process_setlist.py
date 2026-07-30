@@ -15,8 +15,67 @@ from datetime import datetime
 import time
 from googleapiclient.errors import HttpError
 
+def _extract_setlist_columns(pdf_path):
+    """Extract song titles from a column-formatted setlist PDF.
+
+    Song rows share one font size and start at the left margin; header and
+    section rows use different sizes. Titles occupy the leftmost column, with
+    cue/key columns to the right. Returns [] if the PDF isn't this shape so
+    the caller can fall back to line-based extraction.
+    """
+    songs = []
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
+            words = page.extract_words(extra_attrs=['size'])
+            if not words:
+                continue
+
+            rows = {}
+            for w in words:
+                key = round(w['top'] / 3.0)
+                rows.setdefault(key, []).append(w)
+            rows = [sorted(r, key=lambda w: w['x0']) for _, r in sorted(rows.items())]
+
+            # Song rows use the most common leading font size on the page
+            lead_sizes = [round(r[0]['size'], 1) for r in rows]
+            body_size = max(set(lead_sizes), key=lead_sizes.count)
+
+            # Margin comes from body rows only; stray footer text (e.g. the
+            # TCPDF credit) can sit further left and would skew it.
+            body_rows = [r for r in rows if round(r[0]['size'], 1) == body_size]
+            left_margin = min(r[0]['x0'] for r in body_rows)
+
+            song_rows = [r for r in body_rows
+                         if abs(r[0]['x0'] - left_margin) < 5]
+            # Fewer than 3 aligned rows means there's no song table here (e.g.
+            # an empty Spares/Encores page) and the "mode" is just a header.
+            if len(song_rows) < 3:
+                continue
+
+            # The cue column is the leftmost x-position, well right of the
+            # margin, that appears in most song rows.
+            candidates = {}
+            for r in song_rows:
+                for x in {round(w['x0']) for w in r if w['x0'] > left_margin + 50}:
+                    candidates[x] = candidates.get(x, 0) + 1
+            common = sorted(x for x, n in candidates.items()
+                            if n >= len(song_rows) * 0.5)
+            cutoff = common[0] - 5 if common else float('inf')
+
+            for r in song_rows:
+                title = ' '.join(w['text'] for w in r if w['x0'] < cutoff).strip()
+                if len(title) >= 2:
+                    songs.append(title)
+    return songs
+
+
 def extract_setlist(pdf_path):
     print(f"Reading setlist from: {pdf_path}")
+    columnar = _extract_setlist_columns(pdf_path)
+    if columnar:
+        print(f"   [OK] Extracted {len(columnar)} songs (column layout)")
+        return columnar
+
     all_songs = []
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
@@ -154,13 +213,21 @@ def match_songs_to_charts(songs, charts, threshold=70):
     for song in songs:
         best_match = None
         best_score = 0
+        best_rank = (0, 0)
         for page_num, chart_data in charts.items():
             if page_num in used_pages:
                 continue
             chart_title = chart_data.get('raw_title', '') or chart_data.get('title', '')
-            score = max(fuzz.ratio(song.lower(), chart_title.lower()), fuzz.partial_ratio(song.lower(), chart_title.lower()), fuzz.token_sort_ratio(song.lower(), chart_title.lower()))
-            if score > best_score and score >= threshold:
-                best_score = score
+            ratio = fuzz.ratio(song.lower(), chart_title.lower())
+            partial = fuzz.partial_ratio(song.lower(), chart_title.lower())
+            token = fuzz.token_sort_ratio(song.lower(), chart_title.lower())
+            # partial_ratio scores any substring at 100 ("Crazy" inside "Crazy
+            # Arms"), so discount it and break ties on whole-title similarity.
+            score = max(ratio, token, partial * 0.9)
+            rank = (score, ratio)
+            if rank > best_rank and score >= threshold:
+                best_rank = rank
+                best_score = int(round(score))
                 best_match = page_num
         if best_match:
             chart = charts[best_match]
@@ -357,8 +424,9 @@ def create_google_doc(matches, title="Yonder 7th Feb Setlist"):
     return {'id': doc_id, 'url': doc_url, 'title': doc_title}
 
 def main():
-    SETLIST_PDF = "Yonder 7th Feb setlist.pdf"
+    SETLIST_PDF = "Lorraine's 1st Aug.pdf"
     CHARTS_PDF = "Lapin Bleu Jan 28th charts.pdf"
+    DOC_TITLE = "Lorraine's 1st Aug Setlist"
     MATCH_THRESHOLD = 70
     
     print("=" * 60)
@@ -377,7 +445,7 @@ def main():
             return 1
         
         matches = match_songs_to_charts(songs, charts, threshold=MATCH_THRESHOLD)
-        doc_info = create_google_doc(matches)
+        doc_info = create_google_doc(matches, title=DOC_TITLE)
         
         print("\n" + "=" * 60)
         print("[SUCCESS] PROCESSING COMPLETE!")
