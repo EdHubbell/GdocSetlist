@@ -15,13 +15,48 @@ from datetime import datetime
 import time
 from googleapiclient.errors import HttpError
 
+# Every mapping is one character to one character, so normalising a chart
+# body can't shift chords out of alignment with the lyrics beneath them.
+SMART_CHARS = str.maketrans({
+    '‘': "'", '’': "'", '′': "'", '´': "'", '`': "'",
+    '“': '"', '”': '"', '″': '"',
+    '–': '-', '—': '-', '−': '-',
+    ' ': ' ',
+})
+
+def normalize_text(text):
+    """Replace smart quotes, primes and dashes with ASCII equivalents."""
+    return text.translate(SMART_CHARS) if text else text
+
+
+KEY_TOKEN_RE = re.compile(r'^[A-G][b#]?m?(/[A-G][b#]?m?)?$')
+
+def _pick_key_column(song_rows, bounds):
+    """Return the index of the column holding musical keys, or None.
+
+    The key column isn't always the rightmost one - some setlists print
+    key before the cue/tags column - so identify it by content instead.
+    """
+    for i, (lo, hi) in enumerate(bounds):
+        values = [' '.join(w['text'] for w in r if lo <= w['x0'] < hi).strip()
+                  for r in song_rows]
+        values = [v for v in values if v]
+        if not values:
+            continue
+        keys = sum(1 for v in values if KEY_TOKEN_RE.match(v))
+        if keys / len(values) >= 0.7:
+            return i
+    return None
+
+
 def _extract_setlist_columns(pdf_path):
-    """Extract song titles from a column-formatted setlist PDF.
+    """Extract song titles and keys from a column-formatted setlist PDF.
 
     Song rows share one font size and start at the left margin; header and
     section rows use different sizes. Titles occupy the leftmost column, with
-    cue/key columns to the right. Returns [] if the PDF isn't this shape so
-    the caller can fall back to line-based extraction.
+    cue/key columns to the right. Returns a list of {'title', 'key'} dicts,
+    or [] if the PDF isn't this shape so the caller can fall back to
+    line-based extraction.
     """
     songs = []
     with pdfplumber.open(pdf_path) as pdf:
@@ -52,8 +87,8 @@ def _extract_setlist_columns(pdf_path):
             if len(song_rows) < 3:
                 continue
 
-            # The cue column is the leftmost x-position, well right of the
-            # margin, that appears in most song rows.
+            # Columns to the right of the title are the x-positions, well
+            # right of the margin, that appear in most song rows.
             candidates = {}
             for r in song_rows:
                 for x in {round(w['x0']) for w in r if w['x0'] > left_margin + 50}:
@@ -62,10 +97,22 @@ def _extract_setlist_columns(pdf_path):
                             if n >= len(song_rows) * 0.5)
             cutoff = common[0] - 5 if common else float('inf')
 
+            # Each right-hand column runs from its own x to the next one.
+            bounds = [(common[i] - 5,
+                       common[i + 1] - 5 if i + 1 < len(common) else float('inf'))
+                      for i in range(len(common))]
+            key_col = _pick_key_column(song_rows, bounds)
+
             for r in song_rows:
                 title = ' '.join(w['text'] for w in r if w['x0'] < cutoff).strip()
+                key = ''
+                if key_col is not None:
+                    lo, hi = bounds[key_col]
+                    key = ' '.join(w['text'] for w in r
+                                   if lo <= w['x0'] < hi).strip()
                 if len(title) >= 2:
-                    songs.append(title)
+                    songs.append({'title': normalize_text(title),
+                                  'key': normalize_text(key)})
     return songs
 
 
@@ -73,7 +120,9 @@ def extract_setlist(pdf_path):
     print(f"Reading setlist from: {pdf_path}")
     columnar = _extract_setlist_columns(pdf_path)
     if columnar:
-        print(f"   [OK] Extracted {len(columnar)} songs (column layout)")
+        with_keys = sum(1 for s in columnar if s['key'])
+        print(f"   [OK] Extracted {len(columnar)} songs (column layout), "
+              f"{with_keys} with keys")
         return columnar
 
     all_songs = []
@@ -98,7 +147,8 @@ def extract_setlist(pdf_path):
                 cleaned = re.sub(r'\s+', ' ', cleaned).strip()
                 if len(cleaned) < 2 or cleaned.lower() in ['setlist', 'songs', 'tracklist', 'playlist', 'powered by tcpdf']:
                     continue
-                all_songs.append(cleaned)
+                # Line-based extraction can't isolate a key column.
+                all_songs.append({'title': normalize_text(cleaned), 'key': ''})
     print(f"   [OK] Extracted {len(all_songs)} songs")
     return all_songs
 
@@ -198,10 +248,10 @@ def extract_charts(pdf_path):
                 body = '\n'.join(lines[2:]) if len(lines) > 2 else ''
 
             charts[page_num] = {
-                'title': title,
-                'notes': notes,
-                'body': body,
-                'raw_title': title
+                'title': normalize_text(title),
+                'notes': normalize_text(notes),
+                'body': normalize_text(body),
+                'raw_title': normalize_text(title)
             }
     print(f"   [OK] Extracted {len(charts)} chart pages")
     return charts
@@ -210,7 +260,9 @@ def match_songs_to_charts(songs, charts, threshold=70):
     print(f"\nMatching songs to charts (threshold: {threshold}%)")
     matches = {}
     used_pages = set()
-    for song in songs:
+    for entry in songs:
+        song = entry['title']
+        setlist_key = entry.get('key', '')
         best_match = None
         best_score = 0
         best_rank = (0, 0)
@@ -231,10 +283,14 @@ def match_songs_to_charts(songs, charts, threshold=70):
                 best_match = page_num
         if best_match:
             chart = charts[best_match]
-            matches[song] = {'matched': True, 'page': best_match, 'score': best_score, 'title': chart.get('title', ''), 'notes': chart.get('notes', ''), 'body': chart.get('body', '')}
+            chart_key = extract_key(chart.get('notes', ''))
+            if setlist_key and chart_key and setlist_key != chart_key:
+                print(f"   [WARNING] Key mismatch for '{song}': "
+                      f"setlist says {setlist_key}, chart says {chart_key}")
+            matches[song] = {'matched': True, 'page': best_match, 'score': best_score, 'title': chart.get('title', ''), 'notes': chart.get('notes', ''), 'body': chart.get('body', ''), 'setlist_key': setlist_key, 'chart_key': chart_key}
             used_pages.add(best_match)
         else:
-            matches[song] = {'matched': False, 'page': None, 'score': 0, 'title': '', 'notes': '', 'body': ''}
+            matches[song] = {'matched': False, 'page': None, 'score': 0, 'title': '', 'notes': '', 'body': '', 'setlist_key': setlist_key, 'chart_key': ''}
     matched_count = sum(1 for m in matches.values() if m['matched'])
     print(f"\n   [STATS] Matched {matched_count}/{len(songs)} songs ({matched_count/len(songs)*100:.1f}%)")
     return matches
@@ -260,6 +316,24 @@ def is_chord_line(line):
         elif CHORD_RE.match(clean):
             chord_count += 1
     return (chord_count / len(tokens)) >= 0.8
+
+def extract_key(notes):
+    """Pull the key out of a chart's 'Key: A Tags: ...' line."""
+    if not notes:
+        return ''
+    match = re.search(r'Key:\s*(.+?)(?:\s+Tags:|$)', notes)
+    return match.group(1).strip() if match else ''
+
+def make_tab_title(song, data):
+    """Tab label: song name with the key appended, truncated to fit.
+
+    The setlist's own key column wins - it's what the band is playing
+    tonight - with the chart's key as a fallback for songs whose setlist
+    row had no key.
+    """
+    key = data.get('setlist_key') or data.get('chart_key') or ''
+    label = f"{song} - {key}" if key else song
+    return label[:47] + "..." if len(label) > 50 else label
 
 def build_tab_requests(tab_id, title, notes, body_text):
     """Build insert + formatting requests for a single tab in ONE batchUpdate."""
@@ -366,7 +440,7 @@ def create_google_doc(matches, title="Yonder 7th Feb Setlist"):
     
     for i in range(0, len(song_list), 5):
         batch = song_list[i:i + 5]
-        requests = [{'addDocumentTab': {'tabProperties': {'title': song[:47] + "..." if len(song) > 50 else song}}} for song, data in batch]
+        requests = [{'addDocumentTab': {'tabProperties': {'title': make_tab_title(song, data)}}} for song, data in batch]
         if requests:
             try:
                 execute_with_retry(service, doc_id, {'requests': requests})
@@ -424,9 +498,9 @@ def create_google_doc(matches, title="Yonder 7th Feb Setlist"):
     return {'id': doc_id, 'url': doc_url, 'title': doc_title}
 
 def main():
-    SETLIST_PDF = "Lorraine's 1st Aug.pdf"
+    SETLIST_PDF = "Lapin Bleu Aug 19th 2026.pdf"
     CHARTS_PDF = "Lapin Bleu Jan 28th charts.pdf"
-    DOC_TITLE = "Lorraine's 1st Aug Setlist"
+    DOC_TITLE = "Lapin Bleu Aug 19th 2026 Setlist"
     MATCH_THRESHOLD = 70
     
     print("=" * 60)
