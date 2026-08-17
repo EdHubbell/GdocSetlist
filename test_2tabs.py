@@ -21,6 +21,7 @@ from process_setlist import (
     execute_with_retry,
     is_chord_line,
     build_tab_requests,
+    make_tab_title,
 )
 
 
@@ -71,9 +72,8 @@ def main():
     print("[STEP 2] Creating 2 tabs...")
     tab_requests = []
     for song, data in test_songs:
-        tab_name = song[:47] + "..." if len(song) > 50 else song
         tab_requests.append({
-            'addDocumentTab': {'tabProperties': {'title': tab_name}}
+            'addDocumentTab': {'tabProperties': {'title': make_tab_title(song, data)}}
         })
     execute_with_retry(service, doc_id, {'requests': tab_requests})
 
