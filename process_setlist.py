@@ -498,9 +498,9 @@ def create_google_doc(matches, title="Yonder 7th Feb Setlist"):
     return {'id': doc_id, 'url': doc_url, 'title': doc_title}
 
 def main():
-    SETLIST_PDF = "Lapin Bleu Aug 19th 2026.pdf"
+    SETLIST_PDF = "Little Brother Brewing.pdf"
     CHARTS_PDF = "Lapin Bleu Jan 28th charts.pdf"
-    DOC_TITLE = "Lapin Bleu Aug 19th 2026 Setlist"
+    DOC_TITLE = "Little Brother Brewing Setlist"
     MATCH_THRESHOLD = 70
     
     print("=" * 60)
