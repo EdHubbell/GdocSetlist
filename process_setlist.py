@@ -195,7 +195,24 @@ def _reconstruct_spaced_line(line_chars, min_x, char_width):
         result.append(c['text'])
     return ''.join(result).rstrip()
 
-def extract_charts(pdf_path):
+def extract_charts(pdf_paths):
+    """Extract chart pages from one or more charts PDFs.
+
+    Accepts a single path or a list of paths. Charts are keyed by a running
+    number across all files, so a setlist can draw on a main charts PDF plus
+    a supplementary one (e.g. a handful of newly added songs).
+    """
+    if isinstance(pdf_paths, str):
+        pdf_paths = [pdf_paths]
+    charts = {}
+    for pdf_path in pdf_paths:
+        for chart in _extract_charts_from_pdf(pdf_path).values():
+            charts[len(charts) + 1] = chart
+    if len(pdf_paths) > 1:
+        print(f"   [OK] {len(charts)} chart pages across {len(pdf_paths)} files")
+    return charts
+
+def _extract_charts_from_pdf(pdf_path):
     print(f"\nReading charts from: {pdf_path}")
     charts = {}
     with pdfplumber.open(pdf_path) as pdf:
@@ -251,7 +268,9 @@ def extract_charts(pdf_path):
                 'title': normalize_text(title),
                 'notes': normalize_text(notes),
                 'body': normalize_text(body),
-                'raw_title': normalize_text(title)
+                'raw_title': normalize_text(title),
+                'source': pdf_path,
+                'source_page': page_num,
             }
     print(f"   [OK] Extracted {len(charts)} chart pages")
     return charts
@@ -498,9 +517,9 @@ def create_google_doc(matches, title="Yonder 7th Feb Setlist"):
     return {'id': doc_id, 'url': doc_url, 'title': doc_title}
 
 def main():
-    SETLIST_PDF = "Little Brother Brewing.pdf"
-    CHARTS_PDF = "Lapin Bleu Jan 28th charts.pdf"
-    DOC_TITLE = "Little Brother Brewing Setlist"
+    SETLIST_PDF = "Lapin Bleu 4th November.pdf"
+    CHARTS_PDFS = ["Lapin Bleu Jan 28th charts.pdf", "New song charts.pdf"]
+    DOC_TITLE = "Lapin Bleu 4th November Setlist"
     MATCH_THRESHOLD = 70
     
     print("=" * 60)
@@ -513,7 +532,7 @@ def main():
             print("\n[ERROR] No songs found")
             return 1
         
-        charts = extract_charts(CHARTS_PDF)
+        charts = extract_charts(CHARTS_PDFS)
         if not charts:
             print("\n[ERROR] No charts found")
             return 1

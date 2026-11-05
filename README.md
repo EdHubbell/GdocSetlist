@@ -56,8 +56,10 @@ python process_setlist.py
 ```
 
 Place your setlist and charts PDFs in the project directory. Edit the
-`SETLIST_PDF`, `CHARTS_PDF` and `DOC_TITLE` variables in `main()` to point to
-your files.
+`SETLIST_PDF`, `CHARTS_PDFS` and `DOC_TITLE` variables in `main()` to point to
+your files. `CHARTS_PDFS` is a list, so a main charts PDF can be combined with
+a supplementary one holding newly added songs; pages are matched across all
+listed files.
 
 Each run creates a new timestamped document; it does not update a previous
 one. The script prints a Google Docs URL when complete.
